@@ -41,8 +41,7 @@ fileprivate func _DDLogError(_ m: @autoclosure () -> String) { DDLogError("GetLi
                                     freshness: kMFValueFreshnessFresh,
                                     licenseTypeInfo: MFLicenseTypeInfoGumroadV1())
 
-        _DDLogInfo("\(result)
-caller: \(_callingFunc)")
+        _DDLogInfo("\(result) - caller: \(_callingFunc)")
 
         return result
     }
