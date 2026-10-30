@@ -176,27 +176,8 @@ import ReactiveSwift
     @objc func lockDown() {
 
         assertRunLoop(IOThread.runLoop())
-        readsAndWritesState_Begin(readWriteTracker); defer { readsAndWritesState_End(readWriteTracker) }
-
-        /// Update state
-        isLockedDown = true
-        
-        /// Call togglers
-        /// Notes:
-        /// - Calling`toggleBtnModProcessing()` is unnecessary since we already turn off all button inputs in  `toggleButtonTap()`
-        /// - Not sure if we need to call `togglePointingTap(modifications:)`
-        
-        toggleKbModTap()
-        if false { toggleBtnModProcessing() } /// [Mar 2025] Why aren't we calling this?
-        
-        toggleScrollTap()
-        toggleButtonTap()
-        togglePointingTap(modifications: nil)
-        
-        toggleKillSwitchMenuItems()
-        
-        /// Debug
-        logWithState("Toggled due to lockdown.")
+        // Lockdown disabled - paywall removed
+        return
     }
     
     //
