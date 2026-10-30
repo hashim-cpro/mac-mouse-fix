@@ -2,6 +2,10 @@
 # macOS stuff
 .DS_Store
 
+# Build artifacts
+build/
+*.zip
+
 # vscode
 #   Don't leak API keys in launch.json
 .vscode
@@ -18,7 +22,7 @@ gumroad_sales_cache.json
 sudopass.sh
 
 # All contents of folders named xcuserdata
-xcuserdata/
+userdata/
 
 # mac-mouse-fix-scripts cache
 mmfscriptscache/
