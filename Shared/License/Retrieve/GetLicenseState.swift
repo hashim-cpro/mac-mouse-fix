@@ -21,16 +21,11 @@ fileprivate func _DDLogError(_ m: @autoclosure () -> String) { DDLogError("GetLi
     #if IS_MAIN_APP
     static func get_Preliminary(_callingFunc: String = #function) -> MFLicenseState {
 
-        /// This is a quick, preliminary way to get the licenseState, that's intended to render the UI immediately upon app-startup with probably-correct data.
-        /// Note:
-        ///     We set `enableOfflineValidation: false`when getting the cached licenseState so we don't have to retrieve the actual `licenseKey` and `deviceUID` here. I guess as an optimization? Or minimization of shared state to avoid race conditions? Not totally sure this makes sense.
-        ///         This could lead to UI weirdness if we end up in a situation where the preliminary cache access always says the app .isLicensed but the subsequent validated cache access always says that  .isLicensed == false. We are trying to avoid this by deleting the cache after the offline validation fails. [Feb 2025]
-        ///         To avoid such UI weirdness, the goal should be to keep the result of `get_Preliminary()` in sync with `get()` as much as feasible.
-
         assertRunLoop(licensingRunLoop())
 
-        let result = self.licenseStateFromCache(licenseKey: nil, enableOfflineValidation: false) ??
-                     self.licenseStateFromFallback
+        let result = MFLicenseState(isLicensed: true,
+                                    freshness: kMFValueFreshnessFresh,
+                                    licenseTypeInfo: MFLicenseTypeInfoGumroadV1())
         
         _DDLogInfo("get_Preliminary(): \(result)\ncaller: \(_callingFunc)")
 
@@ -40,110 +35,15 @@ fileprivate func _DDLogError(_ m: @autoclosure () -> String) { DDLogError("GetLi
 
     @LicensingActor public static func get(_callingFunc: String = #function) async -> MFLicenseState {
 
-        /// This function determines the current licenseState of the application.
-        ///     To do this, it checks the `licenseServer`, `cache`, `fallback` values, and `special conditions`
-        ///
-        /// Discussion:
-        ///     On offline validation:
-        ///         This function supports offline validation! It will first try to retrieve the `MFLicenseState` from a cache - validating it against the licenseKey using a hash. Only if that fails will it make an internet connection to validate the license. (As of Oct 2024)
-        ///         For a basic explanation of our offline-validation architecture, read `GetLicenseConfig.licenseConfigFromServer()`
-        
         assertRunLoop(licensingRunLoop())
 
-        var result: MFLicenseState?
-        
-        /// Check if the license key is valid
-        
-        checkLicenseKeyValidity: do {
+        let result = MFLicenseState(isLicensed: true,
+                                    freshness: kMFValueFreshnessFresh,
+                                    licenseTypeInfo: MFLicenseTypeInfoGumroadV1())
 
-            /// Read secureStorage
-            var secureStorage: NSMutableDictionary? = nil;
-            let readError = readSecureStorage(/*callerName*/"GetLicenseState.get", &secureStorage);
+        _DDLogInfo("\(result)
+caller: \(_callingFunc)")
 
-            /// Get licenseKey from secureStorage
-            ///     We're very lenient and catch keychain errors (See 'Free days are over' bug notes)
-            var key: String? = nil
-            do {
-                if readError == kSecureStorageReadError_UnexpectedError {
-                    key = nil /// Be lenient with weird errors - makes `licenseStateFromCache` not validate the licenseStateCache against the licenseKey at all.
-                }
-                else if readError == kSecureStorageReadError_DoesntExistYet {
-                    key = nil /// Be lenient even for `kSecureStorageReadError_DoesntExistYet`, because we don't even fully trust that it's not spurious, and we can still use the `licenseStateFromCache` data here. (And reasonably validate it / protect against piracy via `deviceUID`) (See 'Free days are over' bug notes) [Oct 2026]
-                }
-                else if readError == kSecureStorageReadError_ReadSuccessful {
-                    key = secureStorage?.object(forCoolKeyPath: "License.key") as? String
-                    if key == nil {
-
-                        /// Debug
-                        ///     This isn't an error log because this is the normal case if the user hasn't entered a licenseKey e.g. during the trial period.
-                        _DDLogDebug("readSecureStorage succeeded but didn't contain a key. Deciding that the app is not licensed. [Oct 2026]")
-                        if (config("License.licenseStateCache") != nil) {
-                            /// This could trigger 'Free days are over' bug.
-                            ///     Opus 5.5 says it matches `Tim Otheo's` report and could happen when another Mac without a key overrides the keychain or something. [Oct 2026]
-                            _DDLogError("About to delete non-nil licenseStateCache [Oct 2026]")
-                        }
-
-                        /// Delete cache
-                        deleteLicenseStateFromCache(commitConfig: true) /// `<-` See docs in here for discussion.
-
-                        /// Return unlicensed
-                        ///     Note: Perhaps we should also do this if the licenseKey is an emptyString?
-                        result = MFLicenseState(isLicensed: false, freshness: kMFValueFreshnessFresh, licenseTypeInfo: MFLicenseTypeInfoNotLicensed())
-                        break checkLicenseKeyValidity
-                    }
-                }
-            }
-
-
-            /// 1. Ask cache (offline license)
-            result = self.licenseStateFromCache(licenseKey: key, /// Passing through nil if there were`SecureStorageReadError` errors - this makes the offline license validation skip validating against the key entirely (See above and 'Free days are over' bug notes)  [Oct 2026]
-                                                enableOfflineValidation: true)
-
-
-            /// 2. Ask server
-            if (result == nil && key != nil) {
-                
-                let licenseConfig = await GetLicenseConfig.get()
-                
-                var serverError: NSError?
-                (result, serverError) = await licenseStateFromServer(key: key!,
-                                                                     incrementActivationCount: false, /// It's important that this is `false`! Otherwise we might accidentally increase the activationCount of the license more and more
-                                                                     licenseConfig: licenseConfig)
-            
-                if let serverError = serverError {
-                    _DDLogError("LicenseServer API responded with error: \(serverError)")
-                }
-            }
-
-            /// 3. Ask fallback
-            if (result == nil) {
-                result = self.licenseStateFromFallback
-                _DDLogError("Using hardcoded fallback: \(result.map { String(describing: $0) } ?? "<nil>")\n(This is now just a log message. Would formerly return NSError with code: kMFLicenseErrorCode_NoInternetAndNoCache")
-            }
-            
-        } /// end of checkLicenseKeyValidity
-        
-        /// Note: [Jan 2024] We could just update the cache right here instead of deleting cache in all these different places  (See deleteLicenseStateFromCache() docs)
-        
-        /// Unwrap
-        guard var result = result else { fatalError("Something in our code is wrong. MFLicenseState is nil even though we should've assigned a hardcoded fallback value at the very least.") }
-
-        /// Validate checkLicenseKeyValidity result
-        assert(result.freshness != kMFValueFreshnessNone)
-        if result.isLicensed { assert(!(result.licenseTypeInfo is MFLicenseTypeInfoNotLicensed)) }
-        
-        /// Implement special licenseTypes that don't require a valid license key
-        ///     we also call these special licenseTypes "special conditions" or "overrides"
-        if result.isLicensed == false {
-            if let override = await licenseStateFromOverrides() {
-                result = override
-            }
-        }
-        
-        /// Log
-        _DDLogInfo("\(result)\ncaller: \(_callingFunc)")
-
-        /// Return result
         return result
     }
 
@@ -151,30 +51,11 @@ fileprivate func _DDLogError(_ m: @autoclosure () -> String) { DDLogError("GetLi
     
     @LicensingActor public static func licenseStateFromOverrides() async -> MFLicenseState? {
 
-        /// Old notes:
-        ///     - (This note is totally outdated as of Oct 2024 ->) Instead of using a licenseReason, we could also pass that info through the error. That might be better since we'd have one less argument and the the errors can also contain dicts with custom info. Maybe you could think about the error as it's used currently as the "unlicensed reason" (Update: LicenseReason has been removed and merged into MFLicenseTypeInfo. Current system is nice. No need to merge everything into errors I think.)
-        
-        /// Implement `FORCE_LICENSED` flag
-        ///     See License.swift comments for more info on compilation flags.
-
         assertRunLoop(licensingRunLoop())
 
-        #if FORCE_LICENSED
-        return MFLicenseState(isLicensed: true, freshness: kMFValueFreshnessFresh, licenseTypeInfo: MFLicenseTypeInfoForce())
-        #endif
-        
-        /// Implement freeCountries
-        
-        if let regionCode = LicenseUtility.currentRegionCode() {
-            let config = await GetLicenseConfig.get() /// This makes an internet connection - therefore we should probably check this 'override' after the others - to avoid any non-essential internet connections.
-            let isFreeCountry = config.freeCountries.contains(regionCode)
-            if isFreeCountry {
-                return MFLicenseState(isLicensed: true, freshness: kMFValueFreshnessFresh, licenseTypeInfo: MFLicenseTypeInfoFreeCountry(regionCode: regionCode))
-            }
-        }
-        
-        /// Default case - no overrides
-        return nil
+        return MFLicenseState(isLicensed: true,
+                              freshness: kMFValueFreshnessFresh,
+                              licenseTypeInfo: MFLicenseTypeInfoGumroadV1())
     }
     
     private static let licenseStateFromFallback: MFLicenseState = MFLicenseState(isLicensed: false,
@@ -408,186 +289,9 @@ fileprivate func _DDLogError(_ m: @autoclosure () -> String) { DDLogError("GetLi
 
     @LicensingActor public static func licenseStateFromServer(key: String, incrementActivationCount: Bool, licenseConfig: MFLicenseConfig) async -> (licenseState: MFLicenseState?, error: NSError?) {
         assertRunLoop(licensingRunLoop())
-
-        /// This function tries to retrieve the MFLicenseState from the known licenseServers.
-        ///     If we don't receive clear information from any of the licenseServers about whether the license is valid or not, we return `nil`
-        ///
-        /// Test Licenses:
-        ///     (Please don't use these test licenses. If you need a free one, just reach out to me! (However, sometimes I don't answer for a long time...) (You could also hack the source code now that you're already here, maybe take a look at the compilation flags) Thank you :))
-        ///
-        /// **Gumroad $**
-        /// `E3309D7A-7270486C-BA426A87-813EB7B4`
-        ///
-        /// **Gumroad € (old)**
-        /// ``
-        ///
-        /// **Gumroad $ Disabled**
-        /// `0C720579-4ED54F18-ABE90A69-15DA6190`
-        ///
-        /// **Gumroad € (old) with suspicious activation count**
-        /// `535BD2E5-8CF54E9A-8AD642E5-B5934AF8`
-        ///
-        /// **AWS**
-        /// ...
-        ///
-        /// **AWS Hyperwork**
-        /// ...
-        
-        /// Make sure we're only incrementing activation count from the main app
-        ///     It's really bad if we accidentally increase it during normal use.
-        #if IS_HELPER
-            if incrementActivationCount { fatalError(); }
-        #endif
-        
-        enum LicenseValidityFromServer {
-            case valid   ///  The server said that the license is valid
-            case invalid ///  The server said that the license is invalid
-            case unsure  ///  The server didn't say whether the license is valid or not.
-        }
-        
-        var parsedServerResponse: (isValidKey: LicenseValidityFromServer, licenseTypeInfo: MFLicenseTypeInfo?, nOfActivations: Int?, error: NSError?)
-        
-        askServer: do {
-            
-            /// Ask the Gumroad license verification server
-            
-            /// Constants
-            /// Notes:
-            /// - `mmfinapp` was used during the MMF 3 Beta. It was using € which you can't change, so we had to create a new product in Gumroad `mmfinappusd`
-            
-            let gumroadAPIURL = "https://api.gumroad.com/v2"
-            let productPermalinkOld = "mmfinapp"
-            let productPermalink = "mmfinappusd"
-            
-            /// Talk to Gumroad
-            var (serverResponseDict, communicationError, urlResponse) = await APIRequests.sendDictionaryBasedAPIRequest(requestURL: gumroadAPIURL.appending("/licenses/verify"),
-                                                                                   args: ["product_permalink": productPermalink,
-                                                                                          "license_key": key,
-                                                                                          "increment_uses_count": incrementActivationCount ? "true" : "false"])
-            /// Fallback to old euro product
-            var usedOldEuroProduct = false
-            if let message = serverResponseDict?["message"] as? NSString,
-               message == "That license does not exist for the provided product." {
-               
-                /// Update flag
-                usedOldEuroProduct = true
-               
-                /// Validate
-                assert((serverResponseDict?["success"] as? Bool) == false)
-                assert((urlResponse as? HTTPURLResponse)?.statusCode == 404)
-                
-                /// If license doesn't exist for new product, try old product
-                (serverResponseDict, communicationError, urlResponse) = await APIRequests.sendDictionaryBasedAPIRequest(requestURL: gumroadAPIURL.appending("/licenses/verify"),
-                                                                                   args: ["product_permalink": productPermalinkOld,
-                                                                                          "license_key": key,
-                                                                                          "increment_uses_count": incrementActivationCount ? "true" : "false"])
-                
-            }
-            
-            /// Guard:  Error
-            ///     with the server communication
-            if communicationError != nil {
-                parsedServerResponse = (.unsure, nil, nil, communicationError)
-                break askServer
-            }
-            
-            /// Unwrap serverResponseDict
-            guard let serverResponseDict = serverResponseDict else {
-                fatalError("The serverResponseDict was nil even though the error was also nil. There's something wrong in our code.")
-            }
-            
-            ///
-            /// Parse server response
-            ///
-            
-            /// Determine licenseType
-            let licenseTypeInfo: MFLicenseTypeInfo = usedOldEuroProduct ? MFLicenseTypeInfoGumroadV0() : MFLicenseTypeInfoGumroadV1()
-            
-            /// Map server responses to error
-            ///     The communication with the server was successful but the servers response indicates that something went wrong.
-            var responseError: NSError? = nil
-            if (serverResponseDict["success"] as? Bool) != true { /// We expect the Gumroad response to have a boolean field called "success" which tells us whether the license was successfully validated or something went wrong.
-                responseError = NSError(domain: MFLicenseErrorDomain,
-                                code: Int(kMFLicenseErrorCode_GumroadServerResponseError),
-                                userInfo: serverResponseDict)
-            }
-            
-            /// Determine if _server_ said whether the _key_ is valid
-            ///     Explanation: The Gumroad license-verification API just gives us a boolean 'success' field. As I understand, `success: true` always means that the license is *definitively* valid.
-            ///         However, `success: false` could mean different things. For example, as I understand `success` could be `false` in case we send them wrong parameters (the documentation suggests this) or in case there's an internal server error on Gumroads part (this is my speculation).
-            ///         That's why, we check for status code `404` - it seems to be how the server tells us that the license in question is *definitively* invalid. I tested this, (In Oct 2024) and it returns status 404 in case of an unknown license *and* in case of a disabled license. And from what I can think of, those are all the possible ways that a license can be *definitely* invalid.
-            ///             Sidenotes:
-            ///             - The 404 code doesn't really semantically make sense to signify a disabled license - it normally stands for 'Not Found') - but that's how the Gumroad API seems to work.
-            ///             - Actually, even the 404 code mighttt lead to false positives. To be even more granular, we could check for the specific messages that we know the servers sends when a license is unknown or disabled:
-            ///                 - For *unknown* licenses the server sends the message: "That license does not exist for the provided product."
-            ///                 - For *disabled* licensed, the server sends the message: "This license key has been disabled."
-            ///                 ... But I won't change that now cause I'm too lazy to think this through and I think 404 will also work.
-            ///             Update: The Gumroad docs say "You will receive a 404 response code with an error message if verification fails." - so checking 404 seems to be the way (Src: https://help.gumroad.com/article/76-license-keys.html)
-            ///     Considerations:
-            ///         Generally, we want to err on the side of `LicenseValidityFromServer.unsure`, and only use `LicenseValidityFromServer.invalid` when we're *absolutely* sure that the license is invalid.
-            ///         That's because if we set the value to`.invalid` we consider the app *definitively*unlicensed and then lock it down immediately (in case the free days have been used up), which makes for a really annoying user experience if there's a false positive on `.invalid` due to an internal server error or something.
-            ///         If instead, we have a false positive on `.unsure` then we just fall back to the cached value for whether the app is licensed or not, which should make for a much less disruptive user experience.
-            ///         Actually, as I'm working on this, (Oct 9 2024) I got a [GitHub Issue](https://github.com/noah-nuebling/mac-mouse-fix/issues/1136) from a user saying they regularly have their app locked down and they have to re-enter their license. (I think I also saw reports like this before.) Hopefully that stuff is fixed now.
-            
-            let serverSuccess: Bool? = serverResponseDict["success"] as? Bool
-            var isValidKey: LicenseValidityFromServer
-            if      (serverSuccess == true)     { isValidKey = .valid }
-            else if (serverSuccess == nil)      { isValidKey = .unsure }
-            else if (serverSuccess == false) {
-                if (urlResponse as? HTTPURLResponse)?.statusCode == 404 { isValidKey = .invalid }
-                else                                                    { isValidKey = .unsure }
-            } else                              { fatalError("This cannot happen") }
-            
-            /// Gather nOfActivations from serverResponseDict
-            let activations = serverResponseDict["uses"] as? Int
-            
-            /// Return parsed values
-            parsedServerResponse = (isValidKey, licenseTypeInfo, activations, responseError)
-            break askServer
-        
-        } /// End of askServer
-        
-        /// 'Post-processing' on the parsedServerResponse: Validate activation count
-        if parsedServerResponse.isValidKey == .valid {
-            let isSuspiciousActivationCount = (parsedServerResponse.nOfActivations ?? Int.max) > licenseConfig.maxActivations /// [Jul 2025] When activating bulk purchases on Gumroad, it still only produces one license key. I think we'd have to multiply the licenseConfig.maxActivations with the number of seats to support this.
-            if isSuspiciousActivationCount {
-                parsedServerResponse.error = NSError(domain: MFLicenseErrorDomain, code: Int(kMFLicenseErrorCode_InvalidNumberOfActivations), userInfo: ["nOfActivations": parsedServerResponse.nOfActivations ?? -1, "maxActivations": licenseConfig.maxActivations])
-                parsedServerResponse.isValidKey = .invalid
-            }
-        }
-        
-        /// Assemble result
-        let resultError = parsedServerResponse.error
-        let result: MFLicenseState?
-        switch parsedServerResponse.isValidKey {
-        case .unsure:
-            result = nil
-        case .invalid:
-            result = MFLicenseState(isLicensed: false, freshness: kMFValueFreshnessFresh, licenseTypeInfo: MFLicenseTypeInfoNotLicensed())
-        case .valid:
-            guard let licenseTypeInfo = parsedServerResponse.licenseTypeInfo else {
-                fatalError("Something in our code is wrong. We determined the licenseKey to be valid but licenseTypeInfo is nil.")
-            }
-            result = MFLicenseState(isLicensed: true, freshness: kMFValueFreshnessFresh, licenseTypeInfo: licenseTypeInfo)
-        }
-        
-        /// Update cache
-        ///     See discussion in deleteLicenseStateFromCache()
-        
-        if      result?.isLicensed == nil {
-            /// Don't update the cache if the server didn't give a clear yes/no about whether the license is valid.
-        }
-        else if result?.isLicensed == false {
-            self.deleteLicenseStateFromCache(commitConfig: true)
-        }
-        else if result?.isLicensed == true {
-            let deviceUID = getDeviceUID_V2() /// To understand this, also see the other place where we call `getDeviceUID_V2()` in this file [Feb 2025]
-            if deviceUID == nil { _DDLogError("Want to cache licenseState from the server, but getting deviceUID address failed.") } /// Why are we logging this instead of returning an error? The returned errors are specifically to display feedback to the user on the LicenseSheet about the server's assessment of the licenseKey. Aside from this UI feedback, I think returning errors is overkill.
-            self.storeLicenseStateInCache(result!, licenseKey: key, deviceUID_V2: deviceUID)
-        }
-        else { fatalError() }
-        
-        /// Return
-        return (result, resultError)
+        let result = MFLicenseState(isLicensed: true,
+                                    freshness: kMFValueFreshnessFresh,
+                                    licenseTypeInfo: MFLicenseTypeInfoGumroadV1())
+        return (result, nil)
     }
 }
