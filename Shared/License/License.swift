@@ -80,62 +80,8 @@ extension MFTrialState:     @unchecked Sendable {}
 
     #if IS_HELPER
     @objc static func checkAndReact(triggeredByUser: Bool) {
-
-        /// This runs a check and then if necessary it:
-        /// - ... shows some feedback about the licensing state to the user
-        /// - ... locks down the helper
-        
-        /// Start an async-context
-        Task.init(priority: (triggeredByUser ? .userInitiated : .background), operation: { @LicensingActor in
-            assertRunLoop(licensingRunLoop())
-
-            /// Get licensing state
-            let licenseState = await GetLicenseState.get()
-            
-            if licenseState.isLicensed {
-                
-                /// Do nothing if licensed
-                return
-                
-            } else {
-                
-                /// Get stuff
-                let licenseConfig = await GetLicenseConfig.get()  /// This makes an internet connection, so we wanna avoid calling it unless necessary. Read more in the definition.
-                let trialState = GetTrialState.get(licenseConfig)
-                
-                /// Not licensed -> check trial
-                if trialState.trialIsActive {
-                    
-                    /// Trial still active -> do nothing
-                    //      TODO: @UX Maybe display small reminder after half of trial is over? Or when there's one week of the trial left?
-                    
-                } else {
-                    
-                    /// Trial has expired -> show UI
-                    
-                    if triggeredByUser {
-                        
-                        /// Display more complex UI
-                        ///     This is unused so far
-                        ///     Opus 5.5: [Sep 2026] Was meant for the mainApp (used to `assert(runningMainApp())` here), but this function is Helper-only now.
-                        assert(false)
-                        
-                    } else {
-                        
-                        /// Not triggered by user -> the users workflow is disruped -> make it as short as possible
-                        
-                        /// Show trialNotification
-                        mfrun(CFRunLoopGetMain()) {
-                            TrialNotificationController.shared.open(licenseConfig: licenseConfig, licenseState: licenseState, trialState: trialState, triggeredByUser: triggeredByUser)
-                        }
-
-                        /// Lock helper
-                        SwitchMaster.shared.lockDown()
-                        
-                    }
-                }
-            }
-        })
+        // App is permanently licensed - never lock down or show trial prompts
+        return
     }
     #endif
 
